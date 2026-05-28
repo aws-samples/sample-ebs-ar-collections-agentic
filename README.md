@@ -29,7 +29,7 @@ The agent handles both read (analytics) and write (EBS actions) in the same conv
 |Agent|Amazon Bedrock AgentCore Runtime + Strands Agents SDK|
 |LLM|Claude Sonnet 4 via Amazon Bedrock|
 |Visualization|AgentCore Code Interpreter (matplotlib, pandas)|
-|Data Warehouse|Amazon Redshift (8.6M+ rows, 6 tables, 7 analytical views)|
+|Data Warehouse|Amazon Redshift (8.6M+ rows, 6 tables, 6 analytical views)|
 |Data Pipeline|AWS Zero ETL (DMS serverless CDC — Oracle → Amazon Redshift direct)|
 |Collections Lambda|Python 3.11, VPC-attached, 10 actions|
 |EBS Write-back|ISG REST (port 8000) via custom PL/SQL packages|
@@ -343,12 +343,13 @@ Runtime code (Lambda, agent) reads from environment variables set during deploym
 The agent uses the [Strands Agents SDK](https://github.com/strands-agents/sdk-python):
 
 1. User sends a natural language question via WebSocket
-2. The Strands `Agent` receives the question with two `@tool` functions: `execute_redshift_query` and `execute_collections_action`
+2. The Strands `Agent` receives the question with three `@tool` functions: `execute_redshift_query`, `execute_collections_action`, and `generate_chart`
 3. Claude autonomously decides which tools to call — no hardcoded routing
 4. For analytics: the LLM writes SQL, calls Amazon Redshift, interprets results
 5. For actions: the LLM invokes the collections Lambda via ISG REST
-6. Responses stream back in real-time via `stream_async()` through AgentCore Runtime
-7. The frontend displays text as it arrives with a blinking cursor animation
+6. For visualizations: the LLM writes matplotlib code, `generate_chart` runs it in AgentCore Code Interpreter, uploads the rendered PNG to S3, and returns a presigned URL embedded as `[IMAGE]url[/IMAGE]` so the frontend can render it inline
+7. Responses stream back in real-time via `stream_async()` through AgentCore Runtime
+8. The frontend displays text as it arrives with a blinking cursor animation
 
 ---
 
