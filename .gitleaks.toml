@@ -1,0 +1,25 @@
+# GitLeaks configuration — extends default rules with allowlist for false positives.
+# See: https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "False positives from project context"
+
+# Allow Secrets Manager secret NAMES (not values) and example/placeholder strings in deploy-config.json
+paths = [
+  '''deploy-config\.json$''',
+]
+
+# Specific identifiers that look like secrets but are not
+regexes = [
+  '''R12-[A-Z]+-Secret[0-9]*''',           # Oracle EBS Secrets Manager naming convention (a label, not a credential)
+  '''<ENTER[^>]*>''',                       # Placeholder text in template files
+]
+
+stopwords = [
+  '''placeholder''',
+  '''example''',
+  '''CHANGE ME''',
+]

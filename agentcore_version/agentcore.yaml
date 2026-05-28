@@ -1,0 +1,18 @@
+capabilities:
+- code_interpreter
+description: Oracle EBS Cash Flow Analytics Agent - Strands SDK with Streaming
+execution_role: ''
+name: cash_flow_analytics_agent
+region: us-east-1
+runtime:
+  environment:
+    AWS_REGION: us-east-1
+    CLUSTER_ID: oracle-ebs-redshift-zetl
+    COLLECTIONS_LAMBDA: ebs-collections-actions
+    DATABASE: ebsanalytics
+    DB_USER: admin
+    MODEL_ID: us.anthropic.claude-sonnet-4-6
+  handler: agent_strands.invoke
+  memory: 1024
+  runtime: python3.12
+  timeout: 300

@@ -1,0 +1,115 @@
+{
+  "_comment": "Replace <ACCOUNT_ID>, <REGION>, <CLUSTER_ID>, <DATABASE>, and <DB_USER> with your values from deploy-config.json. This policy follows least-privilege: each statement is scoped to specific resource ARNs. Priority: Deploy before agent launch.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockInvokeModel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:<REGION>::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "arn:aws:bedrock:<REGION>::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
+        "arn:aws:bedrock:<REGION>::foundation-model/us.anthropic.claude-sonnet-4-20250514-v1:0",
+        "arn:aws:bedrock:<REGION>::foundation-model/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+      ]
+    },
+    {
+      "Sid": "RedshiftDataAPIExecute",
+      "Effect": "Allow",
+      "Action": [
+        "redshift-data:ExecuteStatement"
+      ],
+      "Resource": "arn:aws:redshift:<REGION>:<ACCOUNT_ID>:cluster:<CLUSTER_ID>"
+    },
+    {
+      "Sid": "RedshiftDataAPIRead",
+      "Effect": "Allow",
+      "Action": [
+        "redshift-data:DescribeStatement",
+        "redshift-data:GetStatementResult"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RedshiftDataAPIList",
+      "Effect": "Allow",
+      "Action": [
+        "redshift-data:ListStatements"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RedshiftGetCredentials",
+      "Effect": "Allow",
+      "Action": [
+        "redshift:GetClusterCredentials"
+      ],
+      "Resource": [
+        "arn:aws:redshift:<REGION>:<ACCOUNT_ID>:dbuser:<CLUSTER_ID>/<DB_USER>",
+        "arn:aws:redshift:<REGION>:<ACCOUNT_ID>:dbname:<CLUSTER_ID>/<DATABASE>"
+      ]
+    },
+    {
+      "Sid": "RedshiftDescribeCluster",
+      "Effect": "Allow",
+      "Action": [
+        "redshift:DescribeClusters"
+      ],
+      "Resource": "arn:aws:redshift:<REGION>:<ACCOUNT_ID>:cluster:<CLUSTER_ID>"
+    },
+    {
+      "Sid": "InvokeCollectionsLambda",
+      "Effect": "Allow",
+      "Action": "lambda:InvokeFunction",
+      "Resource": "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:ebs-collections-actions"
+    },
+    {
+      "Sid": "AgentCoreCodeInterpreter",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateCodeInterpreterSession",
+        "bedrock-agentcore:ExecuteCode",
+        "bedrock-agentcore:DeleteCodeInterpreterSession"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:<REGION>:<ACCOUNT_ID>:code-interpreter-session/*"
+    },
+    {
+      "Sid": "CloudWatchLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:<REGION>:<ACCOUNT_ID>:log-group:/aws/bedrock-agentcore/*"
+    },
+    {
+      "Sid": "ChartBucketAccess",
+      "_comment": "generate_chart uploads PNGs to s3://cash-flow-charts-<ACCOUNT_ID>/charts/ via presigned PUT and serves presigned GET URLs to the LLM. Bucket creation + lifecycle (1-day expiration) are handled at deploy time by deploy.sh, NOT at runtime — the AgentCore runtime's assumed-role session policy strips s3:PutLifecycleConfiguration. The runtime only needs the minimal subset below.",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::cash-flow-charts-<ACCOUNT_ID>"
+    },
+    {
+      "Sid": "ChartBucketObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject"
+      ],
+      "Resource": "arn:aws:s3:::cash-flow-charts-<ACCOUNT_ID>/charts/*"
+    },
+    {
+      "Sid": "GetCallerIdentity",
+      "_comment": "generate_chart uses sts:GetCallerIdentity to discover the account ID for bucket naming.",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    }
+  ]
+}

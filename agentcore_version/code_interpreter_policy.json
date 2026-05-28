@@ -1,0 +1,18 @@
+{
+  "_comment": "Replace <ACCOUNT_ID> and <REGION> with your values from deploy-config.json. Security controls: Sessions are isolated per invocation, auto-expire after 300s (sessionTimeoutSeconds), and have no network access. Enable CloudTrail logging for bedrock-agentcore:ExecuteCode actions for audit.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CodeInterpreterAccess",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateCodeInterpreterSession",
+        "bedrock-agentcore:ExecuteCode",
+        "bedrock-agentcore:GetCodeInterpreterSession",
+        "bedrock-agentcore:DeleteCodeInterpreterSession",
+        "bedrock-agentcore:ListCodeInterpreterSessions"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:<REGION>:<ACCOUNT_ID>:code-interpreter-session/*"
+    }
+  ]
+}

@@ -1,0 +1,918 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::SecretsManager-2020-07-23
+Description: 'Cash Flow Analytics Frontend Infrastructure - React + CloudFront + API Gateway + Cognito'
+
+Parameters:
+  AgentRuntimeArn:
+    Type: String
+    Description: ARN of the AgentCore Runtime agent (update after deploying AgentCore agent)
+    Default: ''
+
+  VpcId:
+    Type: String
+    Description: VPC ID for Lambda functions (EBiz environment VPC)
+
+  SubnetIds:
+    Type: CommaDelimitedList
+    Description: Comma-separated subnet IDs for Lambda functions (private subnets in EBiz VPC)
+
+  SecurityGroupId:
+    Type: String
+    Description: Security group ID for Lambda functions (must allow outbound to EBS host and AWS services)
+
+  # Redshift Parameters
+  RedshiftNodeType:
+    Type: String
+    Description: Redshift node type
+    Default: 'ra3.xlplus'
+  RedshiftNumberOfNodes:
+    Type: Number
+    Description: Number of Redshift nodes
+    Default: 1
+  RedshiftMasterUsername:
+    Type: String
+    Description: Redshift admin username
+    Default: 'admin'
+  RedshiftMasterPassword:
+    Type: String
+    Description: Auto-generated. Not used by application (IAM auth via GetClusterCredentials).
+    Default: ''
+    NoEcho: true
+  RedshiftDatabaseName:
+    Type: String
+    Description: Redshift database name
+    Default: 'ebsanalytics'
+  RedshiftClusterIdentifier:
+    Type: String
+    Description: Redshift cluster identifier
+    Default: 'oracle-ebs-redshift-zetl'
+
+  # Collections Lambda Parameters
+  EbsHost:
+    Type: String
+    Description: Oracle EBS application server IP
+  EbsPort:
+    Type: String
+    Description: Oracle EBS ISG REST port
+    Default: '8000'
+  EbsSecretName:
+    Type: String
+    Description: Secrets Manager secret name for EBS credentials
+  AcmCertificateArn:
+    Type: String
+    Description: ACM certificate ARN for CloudFront custom domain (optional - uses default CloudFront cert if empty)
+    Default: ''
+
+  SenderEmail:
+    Type: String
+    Description: Verified SES sender email address
+    Default: ''
+
+  EnableSecretRotation:
+    Type: String
+    Description: Enable automatic rotation of Redshift admin secret (requires VPC connectivity to Secrets Manager and Redshift)
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
+Conditions:
+  HasAgentRuntimeArn: !Not [!Equals [!Ref AgentRuntimeArn, '']]
+  HasAcmCertificate: !Not [!Equals [!Ref AcmCertificateArn, '']]
+  IsSingleNode: !Equals [!Ref RedshiftNumberOfNodes, 1]
+  EnableRotation: !Equals [!Ref EnableSecretRotation, 'true']
+
+Resources:
+  # S3 Access Logging Bucket
+  # NOTE: Access logging for this bucket itself is intentionally omitted to avoid circular dependency.
+  # For audit compliance, enable access logging to a separate pre-existing bucket if required.
+  LoggingBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: Logging bucket cannot log to itself (circular dependency)
+      cfn-guard:
+        suppress:
+          - S3_BUCKET_DEFAULT_LOCK_ENABLED: Object Lock incompatible with log delivery (logs must be appendable)
+          - S3_BUCKET_LOGGING_ENABLED: Logging bucket cannot log to itself
+          - S3_BUCKET_NO_PUBLIC_RW_ACL: False positive - PublicAccessBlockConfiguration blocks all public access
+    Properties:
+      BucketName: !Sub 'cash-flow-logs-${AWS::AccountId}'
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpirationInDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+
+  LoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LoggingBucket
+      PolicyDocument:
+        Statement:
+          - Sid: S3ServerAccessLogsPolicy
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub '${LoggingBucket.Arn}/*'
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:s3:::cash-flow-frontend-${AWS::AccountId}'
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt LoggingBucket.Arn
+              - !Sub '${LoggingBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # S3 Bucket for React Frontend
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: LoggingBucketPolicy
+    Metadata:
+      cfn-guard:
+        suppress:
+          - S3_BUCKET_DEFAULT_LOCK_ENABLED: Object Lock incompatible with static website hosting (files must be overwritable during deploy)
+    Properties:
+      BucketName: !Sub 'cash-flow-frontend-${AWS::AccountId}'
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: 's3-access/frontend/'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+
+  # CloudFront Origin Access Control
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub 'cash-flow-oac-${AWS::AccountId}'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # S3 Bucket Policy for CloudFront
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: 's3:GetObject'
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt WebsiteBucket.Arn
+              - !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_174
+            comment: Using default CloudFront cert with TLSv1.2_2021 minimum - custom cert requires custom domain
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          Compress: true
+          DefaultTTL: 86400
+          MaxTTL: 31536000
+          MinTTL: 0
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_100
+        Logging:
+          Bucket: !GetAtt LoggingBucket.DomainName
+          IncludeCookies: false
+          Prefix: 'cloudfront/'
+        ViewerCertificate: !If
+          - HasAcmCertificate
+          - AcmCertificateArn: !Ref AcmCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+            MinimumProtocolVersion: TLSv1.2_2021
+
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: cash-flow-analytics-users
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  # Cognito User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: cash-flow-analytics-client
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      RefreshTokenValidity: 30
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      TokenValidityUnits:
+        RefreshToken: days
+        AccessToken: minutes
+        IdToken: minutes
+
+  # KMS Key for data encryption (DynamoDB, SQS)
+  EncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: CMK for Cash Flow Analytics data encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableRootAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  EncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-cmk'
+      TargetKeyId: !Ref EncryptionKey
+
+  # DynamoDB Table for WebSocket Connections
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: cash-flow-websocket-connections
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt EncryptionKey.Arn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # Dead Letter Queue for Lambda error handling
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cash-flow-lambda-dlq
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: !GetAtt EncryptionKey.Arn
+
+  # IAM Role for WebSocket Lambda
+  WebSocketLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cash-flow-websocket-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+        - !Ref WebSocketLambdaPolicy
+
+  # IAM Role for Authorizer Lambda
+  AuthorizerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cash-flow-authorizer-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+        - !Ref AuthorizerDLQPolicy
+
+  # Lambda Function for WebSocket Handler
+  WebSocketHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cash-flow-websocket-handler
+      Runtime: python3.12
+      Handler: websocket_handler.lambda_handler
+      Role: !GetAtt WebSocketLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      ReservedConcurrentExecutions: 50
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+      VpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds:
+          - !Ref SecurityGroupId
+      Environment:
+        Variables:
+          AGENT_ARN: !Ref AgentRuntimeArn
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+          WEBSOCKET_DOMAIN: !Sub '${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com'
+          WEBSOCKET_STAGE: 'prod'
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': 'Placeholder'}
+
+  # Lambda Function for Authorizer
+  AuthorizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cash-flow-websocket-authorizer
+      Runtime: python3.12
+      Handler: authorizer.lambda_handler
+      Role: !GetAtt AuthorizerLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      ReservedConcurrentExecutions: 20
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+      VpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds:
+          - !Ref SecurityGroupId
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          APP_CLIENT_ID: !Ref UserPoolClient
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {'principalId': 'user', 'policyDocument': {'Version': '2012-10-17', 'Statement': [{'Action': 'execute-api:Invoke', 'Effect': 'Deny', 'Resource': event['methodArn']}]}}
+
+  # WebSocket API
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: cash-flow-websocket-api
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: '$request.body.action'
+
+  # WebSocket Authorizer
+  WebSocketAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      ApiId: !Ref WebSocketApi
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthorizerFunction.Arn}/invocations'
+      IdentitySource:
+        - 'route.request.querystring.token'
+
+  # Lambda Permission for Authorizer
+  AuthorizerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AuthorizerFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  # Connect Route
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: '$connect'
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref WebSocketAuthorizer
+      Target: !Sub 'integrations/${ConnectIntegration}'
+
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketHandlerFunction.Arn}/invocations'
+
+  # Disconnect Route
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: '$disconnect'
+      Target: !Sub 'integrations/${DisconnectIntegration}'
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketHandlerFunction.Arn}/invocations'
+
+  # SendMessage Route
+  SendMessageRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: 'sendMessage'
+      Target: !Sub 'integrations/${SendMessageIntegration}'
+
+  SendMessageIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketHandlerFunction.Arn}/invocations'
+
+  # Ping Route
+  PingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: 'ping'
+      Target: !Sub 'integrations/${PingIntegration}'
+
+  PingIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketHandlerFunction.Arn}/invocations'
+
+  # WebSocket Stage
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: prod
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 500
+        ThrottlingRateLimit: 1000
+
+  # Lambda Permissions for WebSocket
+  WebSocketLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebSocketHandlerFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  # =========================================================================
+  # Redshift Cluster
+  # =========================================================================
+  RedshiftAdminSecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: Using default AWS-managed encryption - CMK not required for auto-generated password
+    Properties:
+      Name: !Sub '${AWS::StackName}-redshift-admin'
+      Description: Auto-generated Redshift admin password (not used by application — IAM auth)
+      KmsKeyId: !GetAtt EncryptionKey.Arn
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${RedshiftMasterUsername}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'''
+
+  RedshiftSecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    Condition: EnableRotation
+    DependsOn: RedshiftCluster
+    Properties:
+      SecretId: !Ref RedshiftAdminSecret
+      HostedRotationLambda:
+        RotationType: RedshiftSingleUser
+        VpcSubnetIds: !Join [',', !Ref SubnetIds]
+        VpcSecurityGroupIds: !Ref SecurityGroupId
+      RotationRules:
+        AutomaticallyAfterDays: 30
+
+  RedshiftSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Subnet group for Cash Flow Analytics Redshift cluster
+      SubnetIds: !Ref SubnetIds
+
+  # Parameter group with enable_case_sensitive_identifier=true (required for Zero-ETL)
+  RedshiftParameterGroup:
+    Type: AWS::Redshift::ClusterParameterGroup
+    Properties:
+      Description: Redshift parameter group for Zero-ETL (case-sensitive identifiers enabled)
+      ParameterGroupFamily: redshift-1.0
+      Parameters:
+        - ParameterName: enable_case_sensitive_identifier
+          ParameterValue: 'true'
+        - ParameterName: require_ssl
+          ParameterValue: 'true'
+
+  # IAM role for Redshift to support Zero-ETL integration operations
+  # Required for DMS-to-Redshift Zero-ETL — the cluster must have an IAM role
+  # attached (not just the account-level AWSServiceRoleForRedshift) to authorize
+  # the inbound integration operations from DMS.
+  RedshiftZeroETLRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cash-flow-redshift-zetl-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: redshift.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Ref ZeroETLIntegrationPolicy
+
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    Properties:
+      ClusterIdentifier: !Ref RedshiftClusterIdentifier
+      ClusterType: !If [IsSingleNode, 'single-node', 'multi-node']
+      NodeType: !Ref RedshiftNodeType
+      NumberOfNodes: !Ref RedshiftNumberOfNodes
+      ClusterParameterGroupName: !Ref RedshiftParameterGroup
+      DBName: dev  # Default DB only. Analytics DB is created by setup_zero_etl.py via CREATE DATABASE FROM INTEGRATION
+      MasterUsername: !Sub '{{resolve:secretsmanager:${RedshiftAdminSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${RedshiftAdminSecret}:SecretString:password}}'
+      PubliclyAccessible: false
+      Encrypted: true
+      ClusterSubnetGroupName: !Ref RedshiftSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref SecurityGroupId
+      IamRoles:
+        - !GetAtt RedshiftZeroETLRole.Arn
+
+  # =========================================================================
+  # Collections Lambda + IAM Role
+  # =========================================================================
+  CollectionsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cash-flow-collections-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+        - !Ref CollectionsLambdaPolicy
+
+  CollectionsLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ebs-collections-actions
+      Runtime: python3.11
+      Handler: ebs_collections_actions.lambda_handler
+      Role: !GetAtt CollectionsLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      ReservedConcurrentExecutions: 20
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+      VpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds:
+          - !Ref SecurityGroupId
+      Environment:
+        Variables:
+          CLUSTER_ID: !Ref RedshiftCluster
+          DATABASE: !Ref RedshiftDatabaseName
+          DB_USER: !Ref RedshiftMasterUsername
+          EBS_HOST: !Ref EbsHost
+          EBS_PORT: !Ref EbsPort
+          SECRET_NAME: !Ref EbsSecretName
+          AWS_REGION_NAME: !Ref 'AWS::Region'
+          SES_SENDER_EMAIL: !Ref SenderEmail
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': 'Placeholder — deploy.sh will update with real code'}
+
+  # =========================================================================
+  # Managed Policies (extracted from inline to satisfy IAM_NO_INLINE_POLICY_CHECK)
+  # =========================================================================
+  WebSocketLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-websocket-lambda-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sqs:SendMessage'
+            Resource: !GetAtt DeadLetterQueue.Arn
+          - Effect: Allow
+            Action:
+              - 'dynamodb:PutItem'
+              - 'dynamodb:GetItem'
+              - 'dynamodb:DeleteItem'
+              - 'dynamodb:Query'
+              - 'dynamodb:Scan'
+            Resource: !GetAtt ConnectionsTable.Arn
+          - Sid: KMSAccessForDynamoDBAndSQS
+            Effect: Allow
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:DescribeKey'
+            Resource: !GetAtt EncryptionKey.Arn
+            Condition:
+              StringEquals:
+                'kms:ViaService':
+                  - !Sub 'dynamodb.${AWS::Region}.amazonaws.com'
+                  - !Sub 'sqs.${AWS::Region}.amazonaws.com'
+          - Effect: Allow
+            Action:
+              - 'execute-api:ManageConnections'
+            Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+          - Effect: !If [HasAgentRuntimeArn, 'Allow', 'Deny']
+            Action:
+              - 'bedrock-agentcore:InvokeAgentRuntime'
+            Resource:
+              - !If
+                - HasAgentRuntimeArn
+                - !Ref AgentRuntimeArn
+                - !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/placeholder-update-after-agent-deploy'
+              - !If
+                - HasAgentRuntimeArn
+                - !Sub '${AgentRuntimeArn}/*'
+                - !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/placeholder-update-after-agent-deploy/*'
+
+  AuthorizerDLQPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-authorizer-dlq-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sqs:SendMessage'
+            Resource: !GetAtt DeadLetterQueue.Arn
+          - Sid: KMSAccessForDLQ
+            Effect: Allow
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+            Resource: !GetAtt EncryptionKey.Arn
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'sqs.${AWS::Region}.amazonaws.com'
+
+  ZeroETLIntegrationPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-zero-etl-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'redshift:AuthorizeInboundIntegration'
+              - 'redshift:CreateInboundIntegration'
+              - 'redshift:ModifyInboundIntegration'
+              - 'redshift:DescribeInboundIntegrations'
+            Resource:
+              - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:namespace:*'
+
+  CollectionsLambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-collections-lambda-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RedshiftDataAPIExecute
+            Effect: Allow
+            Action:
+              - 'redshift-data:ExecuteStatement'
+            Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}'
+          - Sid: RedshiftDataAPIRead
+            Effect: Allow
+            Action:
+              - 'redshift-data:DescribeStatement'
+              - 'redshift-data:GetStatementResult'
+              - 'redshift-data:ListStatements'
+              - 'redshift-data:CancelStatement'
+            Resource: '*'
+          - Sid: RedshiftGetCredentials
+            Effect: Allow
+            Action:
+              - 'redshift:GetClusterCredentials'
+            Resource:
+              - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbuser:${RedshiftCluster}/${RedshiftMasterUsername}'
+              - !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:dbname:${RedshiftCluster}/${RedshiftDatabaseName}'
+          - Sid: RedshiftDescribe
+            Effect: Allow
+            Action:
+              - 'redshift:DescribeClusters'
+            Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}'
+          - Sid: SecretsManager
+            Effect: Allow
+            Action:
+              - 'secretsmanager:GetSecretValue'
+            Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${EbsSecretName}*'
+          - Sid: SES
+            Effect: Allow
+            Action:
+              - 'ses:SendEmail'
+            Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+            Condition:
+              StringEquals:
+                'ses:FromAddress': !Ref SenderEmail
+          - Sid: DLQ
+            Effect: Allow
+            Action:
+              - 'sqs:SendMessage'
+            Resource: !GetAtt DeadLetterQueue.Arn
+          - Sid: KMSAccessForDLQ
+            Effect: Allow
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+            Resource: !GetAtt EncryptionKey.Arn
+            Condition:
+              StringEquals:
+                'kms:ViaService': !Sub 'sqs.${AWS::Region}.amazonaws.com'
+
+Outputs:
+  CloudFrontURL:
+    Description: CloudFront Distribution URL
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+    Export:
+      Name: CashFlowCloudFrontURL
+
+  WebSocketURL:
+    Description: WebSocket API URL
+    Value: !Sub 'wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+    Export:
+      Name: CashFlowWebSocketURL
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: CashFlowUserPoolId
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: CashFlowUserPoolClientId
+
+  WebsiteBucket:
+    Description: S3 Bucket for Frontend
+    Value: !Ref WebsiteBucket
+    Export:
+      Name: CashFlowWebsiteBucket
+
+  Region:
+    Description: AWS Region
+    Value: !Ref AWS::Region
+    Export:
+      Name: CashFlowRegion
+
+  RedshiftClusterId:
+    Description: Redshift Cluster Identifier
+    Value: !Ref RedshiftCluster
+    Export:
+      Name: CashFlowRedshiftClusterId
+
+  RedshiftDatabase:
+    Description: Redshift Database Name
+    Value: !Ref RedshiftDatabaseName
+    Export:
+      Name: CashFlowRedshiftDatabase
+
+  CollectionsLambdaArn:
+    Description: Collections Lambda Function ARN
+    Value: !GetAtt CollectionsLambdaFunction.Arn
+    Export:
+      Name: CashFlowCollectionsLambdaArn
+

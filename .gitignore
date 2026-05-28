@@ -1,0 +1,50 @@
+# AgentCore generated state
+.bedrock_agentcore.yaml
+.bedrock_agentcore/
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.dist-info/
+*.so
+
+# Vendored pip packages (installed at deploy time)
+frontend/lambda/boto3/
+frontend/lambda/botocore/
+frontend/lambda/certifi/
+frontend/lambda/cffi/
+frontend/lambda/charset_normalizer/
+frontend/lambda/cryptography/
+frontend/lambda/dateutil/
+frontend/lambda/ecdsa/
+frontend/lambda/idna/
+frontend/lambda/jmespath/
+frontend/lambda/jose/
+frontend/lambda/jwt/
+frontend/lambda/pyasn1/
+frontend/lambda/pycparser/
+frontend/lambda/requests/
+frontend/lambda/rsa/
+frontend/lambda/s3transfer/
+frontend/lambda/urllib3/
+frontend/lambda/bin/
+frontend/lambda/six.py
+collections_agent/lambda/requests/
+collections_agent/lambda/certifi/
+collections_agent/lambda/charset_normalizer/
+collections_agent/lambda/idna/
+collections_agent/lambda/urllib3/
+collections_agent/lambda/bin/
+
+# Build artifacts
+lambda-package.zip
+*.zip
+frontend/build/
+
+# OS junk
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

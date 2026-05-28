@@ -1,0 +1,61 @@
+{
+  "_comment": "Oracle EBS Cash Flow Analytics — Deployment Configuration",
+  "_instructions": "REQUIRED: Fill in all null/empty values below before running deploy.sh. Values marked with *** CHANGE ME *** must be set for your target account.",
+
+  "aws_region": "us-east-1",
+  "stack_name": "cash-flow-analytics",
+
+  "redshift": {
+    "_note": "*** CHANGE ME *** — Set to your Redshift cluster details. Clourformation will create this with the data you entered",
+    "cluster_id": "oracle-ebs-redshift-zetl",
+    "database": "ebsanalytics",
+    "db_user": "admin"
+  },
+
+  "oracle_ebs": {
+    "_note": "*** CHANGE ME *** — Set to your Oracle EBS application server IP and ISG REST port",
+    "host": "<ENTER YOUR Application HOSTNAME or LOADBALANCER DOMAIN NAME",
+    "port": "<ENTER YOUR Application Port Number 8000/443>",
+    "secret_name": "<ENTER A SECERT NAME Eg: R12-ERPVIS-Secret",
+    "_secret_note": "The secret is created automatically by deploy.sh (stage 0). It stores the EBS sysadmin password used by the Lambda for ISG REST calls."
+  },
+
+  "zero_etl": {
+    "_note": "*** CHANGE ME *** — Set source_arn to your Glue connection or DMS endpoint ARN for the Oracle source",
+    "source_arn": "<ENTER THE ARN OF DMS Source Endpoint>",
+    "description": "Oracle EBS to Amazon Redshift Zero-ETL integration",
+    "integration_name": "ebs-zetl-integration",
+    "kms_key_id": "",
+    "_kms_note": "OPTIONAL — Leave empty to use the default AWS-managed key. Set to a CMK ARN if you require customer-managed encryption for compliance. Create with: aws kms create-key --description 'EBS Zero ETL encryption'",
+    "source_database": "APPS",
+    "tables": [
+      "AP.AP_INVOICES_ALL",
+      "AP.AP_PAYMENT_SCHEDULES_ALL",
+      "AR.AR_PAYMENT_SCHEDULES_ALL",
+      "AR.HZ_CUST_ACCOUNTS",
+      "GL.GL_BALANCES",
+      "PO.PO_HEADERS_ALL"
+    ]
+  },
+
+  "agentcore": {
+    "_note": "execution_role can be left empty — agentcore launch will auto-create one. Set model_id to your preferred Bedrock model.",
+    "model_id": "us.anthropic.claude-sonnet-4-6",
+    "execution_role": ""
+  },
+
+  "ses": {
+    "_note": "*** CHANGE ME *** — Set to a verified SES sender email address (or any address on a verified SES domain). This is the FROM address for dunning letters and payment reminders. Only the sender needs verification — recipients do NOT need to be verified.",
+    "_sandbox_note": "If your SES account is in sandbox mode, you can only send to verified addresses. Request production access in the SES console to send to any recipient (https://console.aws.amazon.com/ses/home#/account).",
+    "sender_email": null
+  },
+
+  "vpc": {
+    "_note": "*** CHANGE ME *** — Set to the VPC and subnets of your EBiz environment. Lambda functions will be placed in this VPC to reach the EBS ISG REST API. Use private subnets with a NAT gateway for outbound internet access to AWS services.",
+    "vpc_id": "<ENTER VPC ID>",
+    "subnet_ids": "<ENTER SUBNET IDs Comma Separated>",
+    "security_group_id": "<ENTER THE SECURITY GROUP ID>"
+  },
+
+  "payment_portal_url": ""
+}
