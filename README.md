@@ -339,7 +339,6 @@ The agent uses the [Strands Agents SDK](https://github.com/strands-agents/sdk-py
 
 |Document|Description|
 |-|-|
-|[SOLUTION_GUIDE_V2.md](SOLUTION_GUIDE_V2.md)|Solution guide|
 |[ZERO_ETL_PREREQUISITES.md](ZERO_ETL_PREREQUISITES.md)|Oracle DB, AWS DMS, and Amazon Redshift configuration for Zero ETL|
 
 
