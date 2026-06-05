@@ -62,6 +62,11 @@ load_config() {
   EBS_HOST=$(_read_cfg 'oracle_ebs.host')
   EBS_PORT=$(_read_cfg 'oracle_ebs.port')
   SECRET_NAME=$(_read_cfg 'oracle_ebs.secret_name')
+  # Optional: TLS verification toggle for EBS REST. Defaults to "true" (secure).
+  # Set oracle_ebs.verify_ssl=false in deploy-config.json ONLY for UAT hosts
+  # with self-signed/expired certs. Never disable in production.
+  EBS_VERIFY_SSL=$(_read_cfg 'oracle_ebs.verify_ssl')
+  [ -z "$EBS_VERIFY_SSL" ] && EBS_VERIFY_SSL="true"
   MODEL_ID=$(_read_cfg 'agentcore.model_id')
   EXECUTION_ROLE=$(_read_cfg 'agentcore.execution_role')
   VPC_ID=$(_read_cfg 'vpc.vpc_id')
@@ -337,8 +342,38 @@ deploy_lambda() {
   log "Packaging Lambda zip..."
   (
     cd "$LAMBDA_DIR"
-    pip install -r requirements.txt -t . --quiet --platform manylinux2014_x86_64 --only-binary=:all: 2>/dev/null \
-      || pip install -r requirements.txt -t . --quiet
+
+    # Clean any previously vendored deps so nothing stale leaks into the zip.
+    rm -rf requests certifi charset_normalizer idna urllib3 \
+           *.dist-info __pycache__ bin ./*.so
+
+    # Install everything EXCEPT charset_normalizer as Linux x86_64 / py3.11 wheels.
+    # charset_normalizer ships an optional mypyc-compiled .so that is fragile to
+    # package correctly (it lives as a top-level sibling file and breaks imports
+    # on Lambda with "No module named '<hash>__mypyc'"). We install it separately
+    # as the universal pure-Python wheel so the package is self-contained and
+    # import-safe on any runtime — no compiled extensions at all.
+    pip install requests==2.31.0 -t . \
+      --platform manylinux2014_x86_64 \
+      --python-version 3.11 \
+      --implementation cp \
+      --abi cp311 \
+      --only-binary=:all: \
+      || error "Lambda dependency install failed. Ensure pip>=20.3 and internet access to PyPI."
+
+    # Force the pure-Python (py3-none-any) charset_normalizer wheel, overwriting
+    # any compiled variant pulled in as a transitive dep above.
+    pip install "charset-normalizer==3.3.2" -t . --upgrade \
+      --platform any \
+      --python-version 3.11 \
+      --implementation py \
+      --only-binary=:all: \
+      || error "charset-normalizer pure-Python install failed."
+
+    # Belt-and-suspenders: ensure no compiled charset_normalizer artifact remains.
+    rm -f ./*__mypyc*.so
+    find charset_normalizer -name '*.so' -delete 2>/dev/null || true
+
     zip -qr "$ZIP_FILE" \
       ebs_collections_actions.py \
       requests/ \
@@ -346,7 +381,7 @@ deploy_lambda() {
       charset_normalizer/ \
       idna/ \
       urllib3/
-  )
+  ) || error "Lambda packaging failed"
 
   ZIPSIZE=$(du -h "$ZIP_FILE" | cut -f1)
   log "Package created: $ZIP_FILE ($ZIPSIZE)"
@@ -362,7 +397,7 @@ deploy_lambda() {
   # Update environment variables from config
   log "Updating Lambda environment variables..."
   LAMBDA_UPDATE_ARGS="--function-name $LAMBDA_FUNCTION --region $REGION"
-  LAMBDA_UPDATE_ARGS="${LAMBDA_UPDATE_ARGS} --environment Variables={CLUSTER_ID=${CLUSTER_ID},DATABASE=${DATABASE},DB_USER=${DB_USER},EBS_HOST=${EBS_HOST},EBS_PORT=${EBS_PORT},SECRET_NAME=${SECRET_NAME},AWS_REGION_NAME=${REGION}}"
+  LAMBDA_UPDATE_ARGS="${LAMBDA_UPDATE_ARGS} --environment Variables={CLUSTER_ID=${CLUSTER_ID},DATABASE=${DATABASE},DB_USER=${DB_USER},EBS_HOST=${EBS_HOST},EBS_PORT=${EBS_PORT},SECRET_NAME=${SECRET_NAME},AWS_REGION_NAME=${REGION},EBS_VERIFY_SSL=${EBS_VERIFY_SSL}}"
 
   # Add VPC config if provided — places Lambda in EBiz VPC to reach ISG REST API
   if [ -n "$VPC_ID" ] && [ -n "$SUBNET_IDS" ] && [ -n "$SECURITY_GROUP_ID" ]; then
@@ -402,8 +437,24 @@ deploy_lambda() {
   # Install dependencies if not already present
   if [ ! -d "$WEBSOCKET_DIR/jose" ]; then
     log "Installing WebSocket Lambda dependencies..."
-    pip install -r "$WEBSOCKET_DIR/requirements.txt" -t "$WEBSOCKET_DIR" --quiet --platform manylinux2014_x86_64 --only-binary=:all: 2>/dev/null \
-      || pip install -r "$WEBSOCKET_DIR/requirements.txt" -t "$WEBSOCKET_DIR" --quiet
+    (
+      cd "$WEBSOCKET_DIR"
+
+      # Clean any stale host-native deps before installing.
+      rm -rf jose cryptography cffi pycparser ecdsa pyasn1 rsa \
+             *.dist-info __pycache__ ./*.so six.py
+
+      # Linux x86_64 wheels matching the Lambda runtime (Python 3.11).
+      # No silent fallback to a host-native install — that is what produces
+      # packages that import locally but fail on Lambda.
+      pip install -r "$WEBSOCKET_DIR/requirements.txt" -t "$WEBSOCKET_DIR" \
+        --platform manylinux2014_x86_64 \
+        --python-version 3.11 \
+        --implementation cp \
+        --abi cp311 \
+        --only-binary=:all: \
+        || error "WebSocket Lambda dependency install failed. Ensure pip>=20.3 and that prebuilt manylinux wheels exist for all packages in requirements.txt."
+    ) || error "WebSocket Lambda dependency packaging failed"
   fi
 
   if aws lambda get-function --function-name "$AUTHORIZER_FUNCTION" --region "$REGION" &>/dev/null; then

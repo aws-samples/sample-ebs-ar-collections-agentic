@@ -35,6 +35,27 @@ EBS_PORT    = os.environ.get('EBS_PORT',    '8000')
 EBS_SCHEME  = 'https' if EBS_PORT == '443' else 'http'
 EBS_BASE    = f"{EBS_SCHEME}://{EBS_HOST}:{EBS_PORT}/webservices/rest"
 
+# TLS certificate verification for EBS REST calls.
+# Defaults to TRUE (secure). Set EBS_VERIFY_SSL=false ONLY for UAT/non-prod
+# environments where the EBS host presents a self-signed or expired certificate.
+# WARNING: disabling verification exposes EBS credentials and data to
+# man-in-the-middle interception. Never disable this in production.
+EBS_VERIFY_SSL = os.environ.get('EBS_VERIFY_SSL', 'true').strip().lower() not in (
+    'false', '0', 'no', 'off'
+)
+if not EBS_VERIFY_SSL:
+    logger.warning(
+        "EBS_VERIFY_SSL is disabled — TLS certificate verification is OFF for "
+        "EBS REST calls. This is insecure and intended for UAT only."
+    )
+    # Suppress the repeated urllib3 InsecureRequestWarning noise when the
+    # operator has explicitly opted out of verification.
+    try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except Exception:
+        pass
+
 _redshift   = None
 _ebs_creds  = None
 
@@ -107,7 +128,7 @@ def ebs_rest_post(service_alias, operation, payload, responsibility='RECEIVABLES
         auth=HTTPBasicAuth(user, pwd),
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         timeout=30,
-        verify=True
+        verify=EBS_VERIFY_SSL
     )
 
     logger.info(f"EBS REST response: {resp.status_code} - {resp.text[:500]}")
