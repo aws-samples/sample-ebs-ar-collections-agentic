@@ -75,6 +75,7 @@ Key values to set:
 |`oracle_ebs.port`|EBS ISG REST port|`8000`|
 |`oracle_ebs.secret_name`|Secrets Manager secret for EBS credentials|`soa-ebiz-passwords`|
 |`zero_etl.source_arn`|AWS Glue connection ARN for Oracle source|`arn:aws:glue:...`|
+|`zero_etl.source_sid`|Existing Oracle PDB name used in the Zero-ETL data filter and linked Redshift database; must match the DMS endpoint `DatabaseName`|`ERPPDB`|
 |`agentcore.model_id`|Bedrock model ID|`us.anthropic.claude-sonnet-4-20250514-v1:0`|
 |`agentcore.execution_role`|IAM role ARN for AgentCore (leave empty to auto-create)||
 |`vpc.vpc_id`|VPC ID of the EBiz environment|`vpc-0abc123...`|
