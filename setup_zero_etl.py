@@ -70,9 +70,18 @@ def get_integration_by_name(region, name):
     return None
 
 
+def require_source_sid(zetl):
+    """Return the configured Oracle PDB name or exit with a clear error."""
+    source_sid = zetl.get('source_sid')
+    if not isinstance(source_sid, str) or not source_sid.strip():
+        print("ERROR: zero_etl.source_sid must be set to the Oracle PDB name in deploy-config.json")
+        sys.exit(1)
+    return source_sid.strip()
+
+
 def compute_expected_filter(zetl):
     """Build the data filter string from config (must match create_integration logic)."""
-    source_sid = zetl.get('source_sid', 'ERPUAT')
+    source_sid = require_source_sid(zetl)
     tables = zetl.get('tables', [])
     fallback_schema = zetl.get('source_database', 'APPS')
     parts = []
@@ -332,7 +341,7 @@ def create_redshift_database(cfg, integration_arn=None):
       CREATE DATABASE "<dbname>" FROM INTEGRATION '<integration_id_uuid>' DATABASE "<SID>"
     where:
       - integration_id_uuid is SVV_INTEGRATION.integration_id (UUID only, NOT the full AWS Glue ARN)
-      - SID is the Oracle source database (e.g. ERPUAT)
+      - SID is the configured Oracle source PDB name
       - Identifiers must be double-quoted (enable_case_sensitive_identifier=true folds unquoted to lowercase)
 
     If the database already exists but is NOT linked to the integration (created standalone),
@@ -341,7 +350,7 @@ def create_redshift_database(cfg, integration_arn=None):
     region = cfg['aws_region']
     rs_cfg = cfg['redshift']
     zetl = cfg['zero_etl']
-    source_sid = zetl.get('source_sid', 'ERPUAT')
+    source_sid = require_source_sid(zetl)
 
     if not integration_arn:
         integ = get_integration_by_name(region, zetl['integration_name'])
