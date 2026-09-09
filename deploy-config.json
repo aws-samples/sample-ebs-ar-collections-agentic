@@ -23,6 +23,7 @@
   "zero_etl": {
     "_note": "*** CHANGE ME *** — Set source_arn to your Glue connection or DMS endpoint ARN for the Oracle source",
     "source_arn": "<ENTER THE ARN OF DMS Source Endpoint>",
+    "source_sid": "<ENTER YOUR SOURCE PDB NAME>",
     "description": "Oracle EBS to Amazon Redshift Zero-ETL integration",
     "integration_name": "ebs-zetl-integration",
     "kms_key_id": "",
